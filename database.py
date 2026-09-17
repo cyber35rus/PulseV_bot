@@ -1,10 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+
 from sqlalchemy import BigInteger, DateTime, Integer, String, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 engine = create_async_engine("sqlite+aiosqlite:///bot.db")
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+MOSCOW_OFFSET = timedelta(hours=3)
 
 
 class Base(DeclarativeBase):
@@ -20,6 +23,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String, default="free")
     daily_count: Mapped[int] = mapped_column(Integer, default=0)
     last_reset: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    subscription_until: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
 
 class Question(Base):
@@ -34,6 +38,10 @@ class Question(Base):
     option_d: Mapped[str] = mapped_column(String)
     correct: Mapped[str] = mapped_column(String)
     explanation: Mapped[str] = mapped_column(String, default="")
+
+
+def _moscow_date(dt: datetime):
+    return (dt + MOSCOW_OFFSET).date()
 
 
 async def init_db():
@@ -87,6 +95,11 @@ async def get_or_create_user(tg_id, username, first_name):
         return user
 
 
+async def get_user(tg_id):
+    async with SessionLocal() as session:
+        return await session.get(User, tg_id)
+
+
 async def set_subject(tg_id, subject):
     async with SessionLocal() as session:
         user = await session.get(User, tg_id)
@@ -95,15 +108,13 @@ async def set_subject(tg_id, subject):
             await session.commit()
 
 
-async def get_user(tg_id):
-    async with SessionLocal() as session:
-        return await session.get(User, tg_id)
-
-
 async def get_random_question(subject):
     async with SessionLocal() as session:
         result = await session.execute(
-            select(Question).where(Question.subject == subject).order_by(func.random()).limit(1)
+            select(Question)
+            .where(Question.subject == subject)
+            .order_by(func.random())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
@@ -111,3 +122,29 @@ async def get_random_question(subject):
 async def get_question(qid):
     async with SessionLocal() as session:
         return await session.get(Question, qid)
+
+
+async def check_and_increment_daily(tg_id, limit=20):
+    """Возвращает (allowed, count). Инкрементирует счётчик, если пользователь не premium."""
+    async with SessionLocal() as session:
+        user = await session.get(User, tg_id)
+        if not user:
+            return False, 0
+
+        now = datetime.utcnow()
+        if _moscow_date(user.last_reset) != _moscow_date(now):
+            user.daily_count = 0
+            user.last_reset = now
+
+        if user.role == "premium":
+            await session.commit()
+            return True, user.daily_count
+
+        if user.daily_count >= limit:
+            await session.commit()
+            return False, user.daily_count
+
+        user.daily_count += 1
+        user.last_reset = now
+        await session.commit()
+        return True, user.daily_count
