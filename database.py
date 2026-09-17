@@ -4,7 +4,8 @@ from sqlalchemy import BigInteger, DateTime, Integer, String, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-engine = create_async_engine("sqlite+aiosqlite:///bot.db")
+DB_PATH = "/data/bot.db"
+engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}")
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 MOSCOW_OFFSET = timedelta(hours=3)
@@ -124,8 +125,13 @@ async def get_question(qid):
         return await session.get(Question, qid)
 
 
+def _refresh_role(user: User):
+    if user.role == "premium":
+        if not user.subscription_until or user.subscription_until < datetime.utcnow():
+            user.role = "free"
+
+
 async def check_and_increment_daily(tg_id, limit=20):
-    """Возвращает (allowed, count). Инкрементирует счётчик, если пользователь не premium."""
     async with SessionLocal() as session:
         user = await session.get(User, tg_id)
         if not user:
@@ -135,6 +141,8 @@ async def check_and_increment_daily(tg_id, limit=20):
         if _moscow_date(user.last_reset) != _moscow_date(now):
             user.daily_count = 0
             user.last_reset = now
+
+        _refresh_role(user)
 
         if user.role == "premium":
             await session.commit()
@@ -148,3 +156,17 @@ async def check_and_increment_daily(tg_id, limit=20):
         user.last_reset = now
         await session.commit()
         return True, user.daily_count
+
+
+async def activate_subscription(tg_id, days):
+    async with SessionLocal() as session:
+        user = await session.get(User, tg_id)
+        if not user:
+            return None
+        now = datetime.utcnow()
+        base = user.subscription_until if user.subscription_until and user.subscription_until > now else now
+        user.subscription_until = base + timedelta(days=days)
+        user.role = "premium"
+        await session.commit()
+        await session.refresh(user)
+        return user.subscription_until
