@@ -13,15 +13,17 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from config import BOT_TOKEN
+from config import ADMIN_IDS, BOT_TOKEN
 from database import (
     activate_subscription,
     check_and_increment_daily,
+    count_questions,
     get_or_create_user,
     get_question,
     get_random_question,
     get_user,
     init_db,
+    seed_questions,
     set_subject,
 )
 
@@ -245,6 +247,22 @@ async def cmd_sub(message: Message):
             text=f"Год — {PRICE_YEAR_STARS}⭐ (−40%)", callback_data="buy_year")],
     ])
     await message.answer("Выбери подписку:", reply_markup=kb)
+
+
+@dp.message(Command("reload"))
+async def cmd_reload(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда доступна только администратору.")
+        return
+    await seed_questions(force=True)
+    total = await count_questions()
+    await message.answer(f"✅ Вопросы перезагружены. Всего в базе: {total}")
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    total = await count_questions()
+    await message.answer(f"📊 В базе вопросов: {total}")
 
 
 async def main():
