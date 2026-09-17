@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-DAILY_LIMIT = 3
+DAILY_LIMIT = 20
 
 
 @dp.message(Command("start"))
