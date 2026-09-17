@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -18,7 +19,9 @@ from database import (
     activate_subscription,
     check_and_increment_daily,
     count_questions,
+    count_users,
     create_referral,
+    get_all_user_ids,
     get_or_create_user,
     get_question,
     get_random_question,
@@ -40,6 +43,7 @@ DAILY_LIMIT = 20
 PRICE_MONTH_STARS = 349
 PRICE_YEAR_STARS = 2490
 REFERRAL_REWARD_DAYS = 7
+BROADCAST_DELAY = 0.05  # 50 мс между сообщениями (~20 msg/s)
 
 _bot_username = None
 
@@ -54,6 +58,17 @@ async def get_bot_username():
 
 def referral_link(user_id, bot_username):
     return f"https://t.me/{bot_username}?start=ref_{user_id}"
+
+
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎯 Тренировка", callback_data="do_train")],
+        [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="show_stats")],
+        [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="show_ref")],
+        [InlineKeyboardButton(text="🔄 Сменить предмет", callback_data="change_subj")],
+        [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")],
+        [InlineKeyboardButton(text="💎 Подписка", callback_data="show_subs")],
+    ])
 
 
 @dp.message(Command("start"))
@@ -91,17 +106,10 @@ async def cmd_start(message: Message):
     if user and user.subject:
         name = "Математика" if user.subject == "math" else "Русский язык"
         status = "💎 Premium" if user.role == "premium" else f"🆓 Free ({DAILY_LIMIT}/день)"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎯 Тренировка", callback_data="do_train")],
-            [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="show_stats")],
-            [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="show_ref")],
-            [InlineKeyboardButton(text="🔄 Сменить предмет", callback_data="change_subj")],
-            [InlineKeyboardButton(text="💎 Подписка", callback_data="show_subs")],
-        ])
         await message.answer(
             f"С возвращением! Твой предмет: {name}.\nСтатус: {status}\n\n"
             f"Жми /train или кнопку ниже 👇",
-            reply_markup=kb,
+            reply_markup=main_menu(),
         )
         return
 
@@ -167,6 +175,70 @@ async def cmd_ref(message: Message):
     )
 
 
+# ---------- Поддержка ----------
+
+@dp.callback_query(F.data == "support")
+async def support_cb(call: CallbackQuery):
+    await call.message.answer(
+        "💬 Напиши свой вопрос или проблему следующим сообщением. "
+        "Мы ответим сюда же, в этот чат."
+    )
+    await call.answer()
+
+
+# Ловим текст от пользователя для поддержки, но только если это не команда
+# и это не ответ админа. Регистрируем ниже всех остальных хендлеров текста.
+
+async def forward_to_admins(message: Message):
+    if not ADMIN_IDS:
+        await message.answer("Поддержка временно недоступна.")
+        return
+
+    header = (
+        f"📩 Сообщение от {message.from_user.full_name}"
+        f" (@{message.from_user.username or 'без_ника'})\n"
+        f"ID: {message.from_user.id}"
+    )
+    sent_any = False
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"{header}\n\n{message.text}\n\n"
+                f"↩️ Ответь на это сообщение, и я перешлю твой ответ юзеру.",
+            )
+            sent_any = True
+        except Exception:
+            pass
+    if sent_any:
+        await message.answer("✅ Отправлено в поддержку. Ответ придёт сюда.")
+    else:
+        await message.answer("Не удалось отправить. Попробуй позже.")
+
+
+@dp.message(F.reply_to_message, F.from_user.id.in_(ADMIN_IDS))
+async def admin_reply(message: Message):
+    """Админ отвечает на форвардное сообщение бота → пересылаем юзеру."""
+    source = message.reply_to_message
+    if not source or not source.text:
+        return
+    match = re.search(r"ID:\s*(\d+)", source.text)
+    if not match:
+        return
+    user_id = int(match.group(1))
+    try:
+        await bot.send_message(
+            user_id,
+            f"💬 <b>Ответ поддержки:</b>\n\n{message.text}",
+            parse_mode="HTML",
+        )
+        await message.answer("✅ Ответ доставлен.")
+    except Exception as e:
+        await message.answer(f"❌ Не удалось доставить: {e}")
+
+
+# ---------- Статистика ----------
+
 @dp.callback_query(F.data == "show_stats")
 async def show_stats_cb(call: CallbackQuery):
     await call.answer()
@@ -196,7 +268,6 @@ async def send_stats(message: Message, user_id: int):
         f"Правильных: <b>{correct}</b> ({percent}%)",
     ]
 
-    # Слабые темы (сортировка по проценту правильных, только где решено 2+)
     weak = [
         t for t in stats["topics"]
         if t["total"] >= 1 and (t["correct"] / t["total"]) < 0.7
@@ -209,7 +280,6 @@ async def send_stats(message: Message, user_id: int):
             tp = round(t["correct"] / t["total"] * 100)
             lines.append(f"• {t['topic']} — {tp}% ({t['correct']}/{t['total']})")
 
-    # Подписка
     lines.append("")
     if user.role == "premium" and user.subscription_until:
         days_left = (user.subscription_until - datetime_now()).days
@@ -224,6 +294,8 @@ def datetime_now():
     from datetime import datetime
     return datetime.utcnow()
 
+
+# ---------- Тренировка ----------
 
 @dp.message(Command("train"))
 async def cmd_train(message: Message):
@@ -295,6 +367,8 @@ async def show_subscription_offer(message: Message, count: int):
     )
 
 
+# ---------- Подписка ----------
+
 @dp.callback_query(F.data == "show_subs")
 async def show_subs(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -303,10 +377,7 @@ async def show_subs(call: CallbackQuery):
         [InlineKeyboardButton(
             text=f"Год — {PRICE_YEAR_STARS}⭐ (−40%)", callback_data="buy_year")],
     ])
-    await call.message.answer(
-        "Выбери подписку — оплата в Telegram Stars:",
-        reply_markup=kb,
-    )
+    await call.message.answer("Выбери подписку — оплата в Telegram Stars:", reply_markup=kb)
     await call.answer()
 
 
@@ -357,6 +428,19 @@ async def on_payment(message: Message):
         await message.answer("✅ Оплата получена, но пользователь не найден. Напиши в поддержку.")
 
 
+@dp.message(Command("sub"))
+async def cmd_sub(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"Месяц — {PRICE_MONTH_STARS}⭐", callback_data="buy_month")],
+        [InlineKeyboardButton(
+            text=f"Год — {PRICE_YEAR_STARS}⭐ (−40%)", callback_data="buy_year")],
+    ])
+    await message.answer("Выбери подписку:", reply_markup=kb)
+
+
+# ---------- Ответ на вопрос ----------
+
 @dp.callback_query(F.data.startswith("ans_"))
 async def check_answer(call: CallbackQuery):
     parts = call.data.split("_")
@@ -381,16 +465,7 @@ async def check_answer(call: CallbackQuery):
     await call.answer()
 
 
-@dp.message(Command("sub"))
-async def cmd_sub(message: Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"Месяц — {PRICE_MONTH_STARS}⭐", callback_data="buy_month")],
-        [InlineKeyboardButton(
-            text=f"Год — {PRICE_YEAR_STARS}⭐ (−40%)", callback_data="buy_year")],
-    ])
-    await message.answer("Выбери подписку:", reply_markup=kb)
-
+# ---------- Админ ----------
 
 @dp.message(Command("reload"))
 async def cmd_reload(message: Message):
@@ -402,18 +477,71 @@ async def cmd_reload(message: Message):
     await message.answer(f"✅ Вопросы перезагружены. Всего в базе: {total}")
 
 
+@dp.message(Command("users_count"))
+async def cmd_users_count(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда доступна только администратору.")
+        return
+    total = await count_users()
+    await message.answer(f"👥 Пользователей в базе: {total}")
+
+
 @dp.message(Command("stats_global"))
 async def cmd_stats_global(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("Команда доступна только администратору.")
         return
-    total = await count_questions()
+    users = await count_users()
+    questions = await count_questions()
     await message.answer(
         f"🌍 <b>Глобальная статистика</b>\n\n"
-        f"Вопросов в базе: {total}\n"
-        f"(полная статистика появится позже)",
+        f"👥 Юзеров: {users}\n"
+        f"❓ Вопросов: {questions}",
         parse_mode="HTML",
     )
+
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда доступна только администратору.")
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Использование: /broadcast текст сообщения")
+        return
+
+    text = parts[1].strip()
+    user_ids = await get_all_user_ids()
+    await message.answer(f"📤 Начинаю рассылку на {len(user_ids)} юзеров…")
+
+    sent = 0
+    failed = 0
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(BROADCAST_DELAY)
+
+    await message.answer(f"✅ Рассылка завершена.\nДоставлено: {sent}\nОшибок: {failed}")
+
+
+# ---------- Поддержка: ловим текст ПОСЛЕ всех остальных хендлеров ----------
+# Этот хендлер должен быть последним, чтобы не перехватывать команды.
+
+@dp.message(F.text, ~F.text.startswith("/"))
+async def fallback_text(message: Message):
+    # Если это ответ админа — уже обработан выше
+    if message.from_user.id in ADMIN_IDS and message.reply_to_message:
+        return
+    # Если это юзер в режиме поддержки — форвардим
+    # (простое правило: любое текстовое сообщение от не-админа идёт в поддержку,
+    #  если оно не является ответом бота-инициированной тренировки)
+    # Чтобы не спамить — форвардим только если текст не очень короткий
+    if message.from_user.id not in ADMIN_IDS:
+        await forward_to_admins(message)
 
 
 async def main():
