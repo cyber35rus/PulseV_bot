@@ -151,6 +151,18 @@ async def count_questions():
         return result.scalar_one()
 
 
+async def count_users():
+    async with SessionLocal() as session:
+        result = await session.execute(select(func.count()).select_from(User))
+        return result.scalar_one()
+
+
+async def get_all_user_ids():
+    async with SessionLocal() as session:
+        result = await session.execute(select(User.id))
+        return [row[0] for row in result.all()]
+
+
 def _refresh_role(user: User):
     if user.role == "premium":
         if not user.subscription_until or user.subscription_until < datetime.utcnow():
@@ -257,7 +269,9 @@ async def log_answer(tg_id, question_id, topic, correct):
 async def get_user_stats(tg_id):
     async with SessionLocal() as session:
         total = await session.execute(
-            select(func.count()).select_from(UserProgress).where(UserProgress.user_id == tg_id)
+            select(func.count())
+            .select_from(UserProgress)
+            .where(UserProgress.user_id == tg_id)
         )
         total = total.scalar_one()
 
@@ -282,8 +296,4 @@ async def get_user_stats(tg_id):
             for row in topics.all()
         ]
 
-        return {
-            "total": total,
-            "correct": correct,
-            "topics": topics_data,
-        }
+        return {"total": total, "correct": correct, "topics": topics_data}
