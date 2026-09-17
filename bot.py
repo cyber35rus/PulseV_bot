@@ -18,11 +18,13 @@ from database import (
     activate_subscription,
     check_and_increment_daily,
     count_questions,
+    create_referral,
     get_or_create_user,
     get_question,
     get_random_question,
     get_user,
     init_db,
+    reward_referrer_if_pending,
     seed_questions,
     set_subject,
 )
@@ -35,15 +37,53 @@ dp = Dispatcher()
 DAILY_LIMIT = 20
 PRICE_MONTH_STARS = 349
 PRICE_YEAR_STARS = 2490
+REFERRAL_REWARD_DAYS = 7
+
+_bot_username = None
+
+
+async def get_bot_username():
+    global _bot_username
+    if _bot_username is None:
+        me = await bot.get_me()
+        _bot_username = me.username
+    return _bot_username
+
+
+def referral_link(user_id, bot_username):
+    return f"https://t.me/{bot_username}?start=ref_{user_id}"
 
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    # Парсим deep-link вида /start ref_12345
+    parts = message.text.split(maxsplit=1)
+    referrer_id = None
+    if len(parts) > 1:
+        payload = parts[1].strip()
+        if payload.startswith("ref_"):
+            try:
+                referrer_id = int(payload.replace("ref_", ""))
+            except ValueError:
+                referrer_id = None
+
     user = await get_or_create_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name,
     )
+
+    if referrer_id:
+        created = await create_referral(message.from_user.id, referrer_id)
+        if created:
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    "🎁 По твоей ссылке пришёл новый друг! "
+                    "Как только он решит первый вопрос — ты получишь +7 дней Premium.",
+                )
+            except Exception:
+                pass
 
     await message.answer("Секунду…", reply_markup=ReplyKeyboardRemove())
 
@@ -52,6 +92,7 @@ async def cmd_start(message: Message):
         status = "💎 Premium" if user.role == "premium" else f"🆓 Free ({DAILY_LIMIT}/день)"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎯 Тренировка", callback_data="do_train")],
+            [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="show_ref")],
             [InlineKeyboardButton(text="🔄 Сменить предмет", callback_data="change_subj")],
             [InlineKeyboardButton(text="💎 Подписка", callback_data="show_subs")],
         ])
@@ -101,6 +142,29 @@ async def change_subj(call: CallbackQuery):
     await call.answer()
 
 
+@dp.callback_query(F.data == "show_ref")
+async def show_ref(call: CallbackQuery):
+    username = await get_bot_username()
+    link = referral_link(call.from_user.id, username)
+    await call.message.answer(
+        f"🎁 Твоя реферальная ссылка:\n\n{link}\n\n"
+        f"За каждого друга, который решит хотя бы один вопрос, "
+        f"ты получаешь +{REFERRAL_REWARD_DAYS} дней Premium."
+    )
+    await call.answer()
+
+
+@dp.message(Command("ref"))
+async def cmd_ref(message: Message):
+    username = await get_bot_username()
+    link = referral_link(message.from_user.id, username)
+    await message.answer(
+        f"🎁 Твоя реферальная ссылка:\n\n{link}\n\n"
+        f"За каждого друга, который решит хотя бы один вопрос, "
+        f"ты получаешь +{REFERRAL_REWARD_DAYS} дней Premium."
+    )
+
+
 @dp.message(Command("train"))
 async def cmd_train(message: Message):
     user = await get_user(message.from_user.id)
@@ -114,6 +178,23 @@ async def cmd_train(message: Message):
     if not allowed:
         await show_subscription_offer(message, count)
         return
+
+    # Награда пригласившему за первую активность приглашённого
+    referrer = await reward_referrer_if_pending(message.from_user.id)
+    if referrer:
+        try:
+            await bot.send_message(
+                referrer.id,
+                f"🎉 Твой друг решил первый вопрос! "
+                f"Тебе начислено +{REFERRAL_REWARD_DAYS} дней Premium. "
+                f"Подписка активна до {referrer.subscription_until.strftime('%d.%m.%Y')}.",
+            )
+        except Exception:
+            pass
+        await message.answer(
+            f"🎁 Приятный бонус: твой друг пришёл по твоей ссылке — "
+            f"он получил +{REFERRAL_REWARD_DAYS} дней Premium!"
+        )
 
     q = await get_random_question(user.subject)
     if not q:
