@@ -13,6 +13,7 @@ from aiogram.types import (
 
 from config import BOT_TOKEN
 from database import (
+    check_and_increment_daily,
     get_or_create_user,
     get_question,
     get_random_question,
@@ -25,6 +26,8 @@ logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+DAILY_LIMIT = 20
 
 
 @dp.message(Command("start"))
@@ -54,6 +57,7 @@ async def choose_subject(call: CallbackQuery):
     name = "Математика" if subject == "math" else "Русский язык"
     await call.message.edit_text(
         f"Отлично! Твой предмет: {name}.\n\n"
+        f"Бесплатный лимит: {DAILY_LIMIT} вопросов в день.\n"
         f"Нажми /train, чтобы получить вопрос."
     )
     await call.answer()
@@ -66,6 +70,21 @@ async def cmd_train(message: Message):
         await message.answer("Сначала выбери предмет командой /start")
         return
 
+    allowed, count = await check_and_increment_daily(
+        message.from_user.id, limit=DAILY_LIMIT
+    )
+    if not allowed:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Месяц — 349⭐", callback_data="sub_month")],
+            [InlineKeyboardButton(text="Год — 2490⭐ (−40%)", callback_data="sub_year")],
+        ])
+        await message.answer(
+            f"🔒 На сегодня лимит исчерпан: {count}/{DAILY_LIMIT}.\n\n"
+            f"Оформи подписку — и занимайся без ограничений:",
+            reply_markup=kb,
+        )
+        return
+
     q = await get_random_question(user.subject)
     if not q:
         await message.answer("Пока нет вопросов по этому предмету.")
@@ -76,7 +95,8 @@ async def cmd_train(message: Message):
         f"A) {q.option_a}\n"
         f"B) {q.option_b}\n"
         f"C) {q.option_c}\n"
-        f"D) {q.option_d}"
+        f"D) {q.option_d}\n\n"
+        f"<i>Вопрос {count}/{DAILY_LIMIT} на сегодня</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -88,7 +108,7 @@ async def cmd_train(message: Message):
             InlineKeyboardButton(text="D", callback_data=f"ans_{q.id}_D"),
         ],
     ])
-    await message.answer(text, reply_markup=kb)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("ans_"))
@@ -112,10 +132,17 @@ async def check_answer(call: CallbackQuery):
     await call.answer()
 
 
+@dp.callback_query(F.data.startswith("sub_"))
+async def sub_offer(call: CallbackQuery):
+    await call.answer(
+        "Оплата подключится в следующем обновлении 🚀", show_alert=True
+    )
+
+
 async def main():
     await init_db()
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    
+    asyncio.run(main())
