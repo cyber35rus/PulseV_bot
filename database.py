@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime, timedelta
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, delete, func, select
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -45,6 +45,14 @@ class Question(Base):
     option_d: Mapped[str] = mapped_column(String)
     correct: Mapped[str] = mapped_column(String)
     explanation: Mapped[str] = mapped_column(String, default="")
+
+
+class Referral(Base):
+    __tablename__ = "referrals"
+    invited_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    referrer_id: Mapped[int] = mapped_column(BigInteger)
+    rewarded: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 def _moscow_date(dt: datetime):
@@ -169,3 +177,40 @@ async def activate_subscription(tg_id, days):
         await session.commit()
         await session.refresh(user)
         return user.subscription_until
+
+
+async def create_referral(invited_id, referrer_id):
+    async with SessionLocal() as session:
+        existing = await session.get(Referral, invited_id)
+        if existing:
+            return False
+        if invited_id == referrer_id:
+            return False
+        referrer = await session.get(User, referrer_id)
+        if not referrer:
+            return False
+        ref = Referral(invited_id=invited_id, referrer_id=referrer_id)
+        session.add(ref)
+        await session.commit()
+        return True
+
+
+async def reward_referrer_if_pending(invited_id):
+    """Если приглашённый впервые активен и его ещё не награждали — начисляем +7 дней пригласившему."""
+    async with SessionLocal() as session:
+        ref = await session.get(Referral, invited_id)
+        if not ref or ref.rewarded:
+            return None
+        referrer = await session.get(User, ref.referrer_id)
+        if not referrer:
+            ref.rewarded = True
+            await session.commit()
+            return None
+        now = datetime.utcnow()
+        base = referrer.subscription_until if referrer.subscription_until and referrer.subscription_until > now else now
+        referrer.subscription_until = base + timedelta(days=7)
+        referrer.role = "premium"
+        ref.rewarded = True
+        await session.commit()
+        await session.refresh(referrer)
+        return referrer
