@@ -1,7 +1,8 @@
+import json
 import os
 from datetime import datetime, timedelta
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, func, select
+from sqlalchemy import BigInteger, DateTime, Integer, String, delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -13,6 +14,7 @@ engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}")
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 MOSCOW_OFFSET = timedelta(hours=3)
+QUESTIONS_FILE = os.path.join(os.path.dirname(__file__), "questions.json")
 
 
 class Base(DeclarativeBase):
@@ -55,37 +57,24 @@ async def init_db():
     await seed_questions()
 
 
-async def seed_questions():
+async def seed_questions(force: bool = False):
     async with SessionLocal() as session:
-        result = await session.execute(select(Question).limit(1))
-        if result.scalar_one_or_none():
+        if force:
+            await session.execute(delete(Question))
+            await session.commit()
+        else:
+            result = await session.execute(select(Question).limit(1))
+            if result.scalar_one_or_none():
+                return
+
+        if not os.path.exists(QUESTIONS_FILE):
             return
-        sample = [
-            Question(
-                subject="math", topic="Квадратные уравнения",
-                text="Решите уравнение: x² − 5x + 6 = 0",
-                option_a="x=1, x=6", option_b="x=2, x=3",
-                option_c="x=−2, x=−3", option_d="x=0, x=5",
-                correct="B",
-                explanation="По теореме Виета: сумма корней 5, произведение 6. Корни: 2 и 3.",
-            ),
-            Question(
-                subject="math", topic="Степени",
-                text="Чему равно 2⁵?",
-                option_a="10", option_b="25", option_c="32", option_d="64",
-                correct="C",
-                explanation="2⁵ = 2·2·2·2·2 = 32.",
-            ),
-            Question(
-                subject="rus", topic="Орфография",
-                text="В каком слове пишется НН?",
-                option_a="ветре..ый", option_b="серебря..ый",
-                option_c="кожа..ый", option_d="деревя..ый",
-                correct="D",
-                explanation="«Деревянный» — исключение, пишется с двумя Н.",
-            ),
-        ]
-        session.add_all(sample)
+
+        with open(QUESTIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        questions = [Question(**item) for item in data]
+        session.add_all(questions)
         await session.commit()
 
 
@@ -127,6 +116,12 @@ async def get_random_question(subject):
 async def get_question(qid):
     async with SessionLocal() as session:
         return await session.get(Question, qid)
+
+
+async def count_questions():
+    async with SessionLocal() as session:
+        result = await session.execute(select(func.count()).select_from(Question))
+        return result.scalar_one()
 
 
 def _refresh_role(user: User):
