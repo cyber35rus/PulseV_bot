@@ -7,12 +7,15 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
     Message,
+    PreCheckoutQuery,
     ReplyKeyboardRemove,
 )
 
 from config import BOT_TOKEN
 from database import (
+    activate_subscription,
     check_and_increment_daily,
     get_or_create_user,
     get_question,
@@ -28,6 +31,8 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 DAILY_LIMIT = 20
+PRICE_MONTH_STARS = 349
+PRICE_YEAR_STARS = 2490
 
 
 @dp.message(Command("start"))
@@ -42,13 +47,14 @@ async def cmd_start(message: Message):
 
     if user and user.subject:
         name = "Математика" if user.subject == "math" else "Русский язык"
+        status = "💎 Premium" if user.role == "premium" else f"🆓 Free ({DAILY_LIMIT}/день)"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎯 Тренировка (/train)", callback_data="do_train")],
+            [InlineKeyboardButton(text="🎯 Тренировка", callback_data="do_train")],
             [InlineKeyboardButton(text="🔄 Сменить предмет", callback_data="change_subj")],
+            [InlineKeyboardButton(text="💎 Подписка", callback_data="show_subs")],
         ])
         await message.answer(
-            f"С возвращением! Твой предмет: {name}.\n"
-            f"Бесплатный лимит: {DAILY_LIMIT} вопросов в день.\n\n"
+            f"С возвращением! Твой предмет: {name}.\nСтатус: {status}\n\n"
             f"Жми /train или кнопку ниже 👇",
             reply_markup=kb,
         )
@@ -104,15 +110,7 @@ async def cmd_train(message: Message):
         message.from_user.id, limit=DAILY_LIMIT
     )
     if not allowed:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Месяц — 349⭐", callback_data="sub_month")],
-            [InlineKeyboardButton(text="Год — 2490⭐ (−40%)", callback_data="sub_year")],
-        ])
-        await message.answer(
-            f"🔒 На сегодня лимит исчерпан: {count}/{DAILY_LIMIT}.\n\n"
-            f"Оформи подписку — и занимайся без ограничений:",
-            reply_markup=kb,
-        )
+        await show_subscription_offer(message, count)
         return
 
     q = await get_random_question(user.subject)
@@ -141,6 +139,82 @@ async def cmd_train(message: Message):
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
+async def show_subscription_offer(message: Message, count: int):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"Месяц — {PRICE_MONTH_STARS}⭐", callback_data="buy_month")],
+        [InlineKeyboardButton(
+            text=f"Год — {PRICE_YEAR_STARS}⭐ (−40%)", callback_data="buy_year")],
+    ])
+    await message.answer(
+        f"🔒 На сегодня лимит исчерпан: {count}/{DAILY_LIMIT}.\n\n"
+        f"Оформи подписку — и занимайся без ограничений:",
+        reply_markup=kb,
+    )
+
+
+@dp.callback_query(F.data == "show_subs")
+async def show_subs(call: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"Месяц — {PRICE_MONTH_STARS}⭐", callback_data="buy_month")],
+        [InlineKeyboardButton(
+            text=f"Год — {PRICE_YEAR_STARS}⭐ (−40%)", callback_data="buy_year")],
+    ])
+    await call.message.answer(
+        "Выбери подписку — оплата в Telegram Stars:",
+        reply_markup=kb,
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data == "buy_month")
+async def buy_month(call: CallbackQuery):
+    await send_sub_invoice(call, days=30, stars=PRICE_MONTH_STARS, title="Подписка на месяц")
+
+
+@dp.callback_query(F.data == "buy_year")
+async def buy_year(call: CallbackQuery):
+    await send_sub_invoice(call, days=365, stars=PRICE_YEAR_STARS, title="Подписка на год")
+
+
+async def send_sub_invoice(call: CallbackQuery, days: int, stars: int, title: str):
+    prices = [LabeledPrice(label=title, amount=stars)]
+    await bot.send_invoice(
+        chat_id=call.from_user.id,
+        title=title,
+        description=f"Безлимитный доступ к тренировкам на {days} дней",
+        payload=f"sub_{days}",
+        provider_token="",
+        currency="XTR",
+        prices=prices,
+    )
+    await call.answer()
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await pre_checkout_query.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def on_payment(message: Message):
+    payload = message.successful_payment.invoice_payload
+    try:
+        days = int(payload.replace("sub_", ""))
+    except ValueError:
+        days = 30
+
+    until = await activate_subscription(message.from_user.id, days)
+    if until:
+        await message.answer(
+            f"✅ Оплата получена! Подписка активирована до "
+            f"{until.strftime('%d.%m.%Y')}.\n\nЗанимайся без ограничений 🚀"
+        )
+    else:
+        await message.answer("✅ Оплата получена, но пользователь не найден. Напиши в поддержку.")
+
+
 @dp.callback_query(F.data.startswith("ans_"))
 async def check_answer(call: CallbackQuery):
     parts = call.data.split("_")
@@ -162,11 +236,15 @@ async def check_answer(call: CallbackQuery):
     await call.answer()
 
 
-@dp.callback_query(F.data.startswith("sub_"))
-async def sub_offer(call: CallbackQuery):
-    await call.answer(
-        "Оплата подключится в следующем обновлении 🚀", show_alert=True
-    )
+@dp.message(Command("sub"))
+async def cmd_sub(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"Месяц — {PRICE_MONTH_STARS}⭐", callback_data="buy_month")],
+        [InlineKeyboardButton(
+            text=f"Год — {PRICE_YEAR_STARS}⭐ (−40%)", callback_data="buy_year")],
+    ])
+    await message.answer("Выбери подписку:", reply_markup=kb)
 
 
 async def main():
