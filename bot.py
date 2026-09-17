@@ -23,7 +23,9 @@ from database import (
     get_question,
     get_random_question,
     get_user,
+    get_user_stats,
     init_db,
+    log_answer,
     reward_referrer_if_pending,
     seed_questions,
     set_subject,
@@ -35,8 +37,8 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 DAILY_LIMIT = 20
-PRICE_MONTH_STARS = 299
-PRICE_YEAR_STARS = 2390
+PRICE_MONTH_STARS = 349
+PRICE_YEAR_STARS = 2490
 REFERRAL_REWARD_DAYS = 7
 
 _bot_username = None
@@ -56,7 +58,6 @@ def referral_link(user_id, bot_username):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    # Парсим deep-link вида /start ref_12345
     parts = message.text.split(maxsplit=1)
     referrer_id = None
     if len(parts) > 1:
@@ -92,6 +93,7 @@ async def cmd_start(message: Message):
         status = "💎 Premium" if user.role == "premium" else f"🆓 Free ({DAILY_LIMIT}/день)"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎯 Тренировка", callback_data="do_train")],
+            [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="show_stats")],
             [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="show_ref")],
             [InlineKeyboardButton(text="🔄 Сменить предмет", callback_data="change_subj")],
             [InlineKeyboardButton(text="💎 Подписка", callback_data="show_subs")],
@@ -165,6 +167,64 @@ async def cmd_ref(message: Message):
     )
 
 
+@dp.callback_query(F.data == "show_stats")
+async def show_stats_cb(call: CallbackQuery):
+    await call.answer()
+    await send_stats(call.message, call.from_user.id)
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    await send_stats(message, message.from_user.id)
+
+
+async def send_stats(message: Message, user_id: int):
+    user = await get_user(user_id)
+    if not user:
+        await message.answer("Сначала напиши /start")
+        return
+
+    stats = await get_user_stats(user_id)
+    total = stats["total"]
+    correct = stats["correct"]
+    percent = round(correct / total * 100) if total else 0
+
+    lines = [
+        "📊 <b>Твой прогресс</b>",
+        "",
+        f"Решено вопросов: <b>{total}</b>",
+        f"Правильных: <b>{correct}</b> ({percent}%)",
+    ]
+
+    # Слабые темы (сортировка по проценту правильных, только где решено 2+)
+    weak = [
+        t for t in stats["topics"]
+        if t["total"] >= 1 and (t["correct"] / t["total"]) < 0.7
+    ]
+    weak.sort(key=lambda t: t["correct"] / t["total"])
+    if weak:
+        lines.append("")
+        lines.append("⚠️ <b>Слабые темы:</b>")
+        for t in weak[:5]:
+            tp = round(t["correct"] / t["total"] * 100)
+            lines.append(f"• {t['topic']} — {tp}% ({t['correct']}/{t['total']})")
+
+    # Подписка
+    lines.append("")
+    if user.role == "premium" and user.subscription_until:
+        days_left = (user.subscription_until - datetime_now()).days
+        lines.append(f"💎 Premium, осталось дней: <b>{max(days_left, 0)}</b>")
+    else:
+        lines.append("🆓 Free, лимит 20 вопросов в день")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+def datetime_now():
+    from datetime import datetime
+    return datetime.utcnow()
+
+
 @dp.message(Command("train"))
 async def cmd_train(message: Message):
     user = await get_user(message.from_user.id)
@@ -179,7 +239,6 @@ async def cmd_train(message: Message):
         await show_subscription_offer(message, count)
         return
 
-    # Награда пригласившему за первую активность приглашённого
     referrer = await reward_referrer_if_pending(message.from_user.id)
     if referrer:
         try:
@@ -309,7 +368,10 @@ async def check_answer(call: CallbackQuery):
         await call.answer("Вопрос не найден", show_alert=True)
         return
 
-    if q.correct.upper() == chosen.upper():
+    is_correct = q.correct.upper() == chosen.upper()
+    await log_answer(call.from_user.id, q.id, q.topic, is_correct)
+
+    if is_correct:
         head = "✅ Правильно!"
     else:
         head = f"❌ Неправильно. Верный ответ: {q.correct}"
@@ -340,10 +402,18 @@ async def cmd_reload(message: Message):
     await message.answer(f"✅ Вопросы перезагружены. Всего в базе: {total}")
 
 
-@dp.message(Command("stats"))
-async def cmd_stats(message: Message):
+@dp.message(Command("stats_global"))
+async def cmd_stats_global(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда доступна только администратору.")
+        return
     total = await count_questions()
-    await message.answer(f"📊 В базе вопросов: {total}")
+    await message.answer(
+        f"🌍 <b>Глобальная статистика</b>\n\n"
+        f"Вопросов в базе: {total}\n"
+        f"(полная статистика появится позже)",
+        parse_mode="HTML",
+    )
 
 
 async def main():
