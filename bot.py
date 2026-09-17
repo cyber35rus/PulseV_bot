@@ -32,13 +32,27 @@ DAILY_LIMIT = 20
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await get_or_create_user(
+    user = await get_or_create_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name,
     )
 
     await message.answer("Секунду…", reply_markup=ReplyKeyboardRemove())
+
+    if user and user.subject:
+        name = "Математика" if user.subject == "math" else "Русский язык"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎯 Тренировка (/train)", callback_data="do_train")],
+            [InlineKeyboardButton(text="🔄 Сменить предмет", callback_data="change_subj")],
+        ])
+        await message.answer(
+            f"С возвращением! Твой предмет: {name}.\n"
+            f"Бесплатный лимит: {DAILY_LIMIT} вопросов в день.\n\n"
+            f"Жми /train или кнопку ниже 👇",
+            reply_markup=kb,
+        )
+        return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📐 Математика", callback_data="subj_math")],
@@ -60,6 +74,22 @@ async def choose_subject(call: CallbackQuery):
         f"Бесплатный лимит: {DAILY_LIMIT} вопросов в день.\n"
         f"Нажми /train, чтобы получить вопрос."
     )
+    await call.answer()
+
+
+@dp.callback_query(F.data == "do_train")
+async def do_train(call: CallbackQuery):
+    await call.answer()
+    await cmd_train(call.message)
+
+
+@dp.callback_query(F.data == "change_subj")
+async def change_subj(call: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📐 Математика", callback_data="subj_math")],
+        [InlineKeyboardButton(text="📖 Русский язык", callback_data="subj_rus")],
+    ])
+    await call.message.edit_text("Выбери новый предмет:", reply_markup=kb)
     await call.answer()
 
 
