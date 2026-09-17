@@ -3,7 +3,13 @@ import logging
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardRemove,
+)
 
 from config import BOT_TOKEN
 from database import (
@@ -27,15 +33,17 @@ async def cmd_start(message: Message):
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name,
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📐 Математика", callback_data="subj_math")],
-        [InlineKeyboardButton(text="📖 Русский язык", callback_data="subj_rus")],
-    ])
-    await message.answer(
-        "Привет! Я помогу подготовиться к ЕГЭ/ОГЭ.\nВыбери предмет 👇",
-        reply_markup=kb,
-    )
+    # Убираем старую ReplyKeyboard, если она была
+await message.answer("Секунду…", reply_markup=ReplyKeyboardRemove())
+
+kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="📐 Математика", callback_data="subj_math")],
+    [InlineKeyboardButton(text="📖 Русский язык", callback_data="subj_rus")],
+])
+await message.answer(
+    "Привет! Я помогу подготовиться к ЕГЭ/ОГЭ.\nВыбери предмет 👇",
+    reply_markup=kb,
+)
 
 
 @dp.callback_query(F.data.startswith("subj_"))
