@@ -2,7 +2,16 @@ import json
 import os
 from datetime import datetime, timedelta
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, delete, func, select
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Integer,
+    String,
+    delete,
+    func,
+    select,
+)
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -53,6 +62,16 @@ class Referral(Base):
     referrer_id: Mapped[int] = mapped_column(BigInteger)
     rewarded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UserProgress(Base):
+    __tablename__ = "user_progress"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    question_id: Mapped[int] = mapped_column(Integer)
+    topic: Mapped[str] = mapped_column(String, default="Общее")
+    correct: Mapped[bool] = mapped_column(Boolean)
+    answered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 def _moscow_date(dt: datetime):
@@ -171,7 +190,11 @@ async def activate_subscription(tg_id, days):
         if not user:
             return None
         now = datetime.utcnow()
-        base = user.subscription_until if user.subscription_until and user.subscription_until > now else now
+        base = (
+            user.subscription_until
+            if user.subscription_until and user.subscription_until > now
+            else now
+        )
         user.subscription_until = base + timedelta(days=days)
         user.role = "premium"
         await session.commit()
@@ -196,7 +219,6 @@ async def create_referral(invited_id, referrer_id):
 
 
 async def reward_referrer_if_pending(invited_id):
-    """Если приглашённый впервые активен и его ещё не награждали — начисляем +7 дней пригласившему."""
     async with SessionLocal() as session:
         ref = await session.get(Referral, invited_id)
         if not ref or ref.rewarded:
@@ -207,10 +229,61 @@ async def reward_referrer_if_pending(invited_id):
             await session.commit()
             return None
         now = datetime.utcnow()
-        base = referrer.subscription_until if referrer.subscription_until and referrer.subscription_until > now else now
+        base = (
+            referrer.subscription_until
+            if referrer.subscription_until and referrer.subscription_until > now
+            else now
+        )
         referrer.subscription_until = base + timedelta(days=7)
         referrer.role = "premium"
         ref.rewarded = True
         await session.commit()
         await session.refresh(referrer)
         return referrer
+
+
+async def log_answer(tg_id, question_id, topic, correct):
+    async with SessionLocal() as session:
+        entry = UserProgress(
+            user_id=tg_id,
+            question_id=question_id,
+            topic=topic or "Общее",
+            correct=correct,
+        )
+        session.add(entry)
+        await session.commit()
+
+
+async def get_user_stats(tg_id):
+    async with SessionLocal() as session:
+        total = await session.execute(
+            select(func.count()).select_from(UserProgress).where(UserProgress.user_id == tg_id)
+        )
+        total = total.scalar_one()
+
+        correct = await session.execute(
+            select(func.count())
+            .select_from(UserProgress)
+            .where(UserProgress.user_id == tg_id, UserProgress.correct.is_(True))
+        )
+        correct = correct.scalar_one()
+
+        topics = await session.execute(
+            select(
+                UserProgress.topic,
+                func.count().label("total"),
+                func.sum(func.cast(UserProgress.correct, Integer)).label("correct"),
+            )
+            .where(UserProgress.user_id == tg_id)
+            .group_by(UserProgress.topic)
+        )
+        topics_data = [
+            {"topic": row.topic, "total": row.total, "correct": row.correct or 0}
+            for row in topics.all()
+        ]
+
+        return {
+            "total": total,
+            "correct": correct,
+            "topics": topics_data,
+        }
